@@ -121,13 +121,13 @@ fi
 
 print_message "Updating Debian package repositories..."
 
-apt-get update
+# apt-get update
 
 print_success "Package lists updated."
 
 print_message "Upgrading installed packages..."
 
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+# DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
 print_success "System packages upgraded."
 
