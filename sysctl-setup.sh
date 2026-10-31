@@ -9,6 +9,7 @@ set -Eeuo pipefail
 
 CONFIG_FILE="/etc/sysctl.d/99-emperor-penguin.conf"
 BACKUP_DIR="/root/sysctl-backups"
+SYSCTL_BIN="/usr/sbin/sysctl"
 
 DESIRED_CONFIG=$(cat <<'EOF'
 # Emperor Penguin - Kernel Optimization
@@ -41,7 +42,7 @@ error_exit() {
 # Error handling
 # ------------------------------------------
 
-trap 'error_exit "An unexpected error occurred at line $LINENO."' ERR
+trap 'error_exit "Unexpected error at line $LINENO."' ERR
 
 # ------------------------------------------
 # Pre-checks
@@ -50,7 +51,7 @@ trap 'error_exit "An unexpected error occurred at line $LINENO."' ERR
 print_message "INFO" "Starting kernel optimization..."
 
 if [[ "$EUID" -ne 0 ]]; then
-    error_exit "Please run this script as root or using sudo."
+    error_exit "Please run this script as root."
 fi
 
 if [[ ! -f /etc/os-release ]]; then
@@ -63,38 +64,29 @@ if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "13" ]]; then
     error_exit "This script is designed for Debian 13."
 fi
 
-SYSCTL_BIN="/usr/sbin/sysctl"
-
 if [[ ! -x "$SYSCTL_BIN" ]]; then
-    error_exit "sysctl was not found. Please install procps first."
+    error_exit "sysctl was not found. Please install procps."
 fi
 
 print_message "INFO" "System checks passed."
 
 # ------------------------------------------
-# Backup existing configuration
+# Configuration and backup
 # ------------------------------------------
 
 mkdir -p "$BACKUP_DIR"
 
 config_changed=false
 
-if [[ -f "$CONFIG_FILE" ]] &&
-   [[ "$(cat "$CONFIG_FILE")" != "$DESIRED_CONFIG" ]]; then
-
-    BACKUP_FILE="$BACKUP_DIR/99-emperor-penguin.conf.$(date +%Y%m%d-%H%M%S)"
-
-    cp -a "$CONFIG_FILE" "$BACKUP_FILE"
-
-    print_message "INFO" "Previous configuration backed up to $BACKUP_FILE"
-fi
-
-# ------------------------------------------
-# Write configuration
-# ------------------------------------------
-
 if [[ ! -f "$CONFIG_FILE" ]] ||
    [[ "$(cat "$CONFIG_FILE")" != "$DESIRED_CONFIG" ]]; then
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        BACKUP_FILE="$BACKUP_DIR/99-emperor-penguin.conf.$(date +%Y%m%d-%H%M%S)"
+        cp -a "$CONFIG_FILE" "$BACKUP_FILE"
+
+        print_message "INFO" "Previous configuration backed up."
+    fi
 
     printf '%s\n' "$DESIRED_CONFIG" > "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
@@ -108,32 +100,46 @@ else
 fi
 
 # ------------------------------------------
-# Apply kernel parameters
+# Apply configuration
 # ------------------------------------------
 
 if [[ "$config_changed" == true ]]; then
 
     "$SYSCTL_BIN" -p "$CONFIG_FILE"
 
-    print_message "INFO" "Kernel parameters applied."
+    print_message "INFO" "Configuration applied to the kernel."
 
 else
-    print_message "INFO" "No configuration changes detected."
+
+    # Check current runtime values
+    ICMP_VALUE=$("$SYSCTL_BIN" -n net.ipv4.icmp_echo_ignore_all)
+    SWAPPINESS_VALUE=$("$SYSCTL_BIN" -n vm.swappiness)
+
+    # Repair only incorrect runtime values
+    if [[ "$ICMP_VALUE" != "1" ]]; then
+        "$SYSCTL_BIN" -w net.ipv4.icmp_echo_ignore_all=1
+        print_message "INFO" "ICMP setting corrected."
+    fi
+
+    if [[ "$SWAPPINESS_VALUE" != "10" ]]; then
+        "$SYSCTL_BIN" -w vm.swappiness=10
+        print_message "INFO" "Swappiness corrected."
+    fi
 fi
 
 # ------------------------------------------
-# Verify configuration
+# Final verification
 # ------------------------------------------
 
 ICMP_VALUE=$("$SYSCTL_BIN" -n net.ipv4.icmp_echo_ignore_all)
 SWAPPINESS_VALUE=$("$SYSCTL_BIN" -n vm.swappiness)
 
 if [[ "$ICMP_VALUE" != "1" ]]; then
-    error_exit "ICMP Echo configuration verification failed."
+    error_exit "ICMP configuration verification failed."
 fi
 
 if [[ "$SWAPPINESS_VALUE" != "10" ]]; then
-    error_exit "Swappiness configuration verification failed."
+    error_exit "Swappiness verification failed."
 fi
 
 print_message "INFO" "Final configuration:"
@@ -141,3 +147,4 @@ print_message "INFO" "ICMP Echo Ignore All: $ICMP_VALUE"
 print_message "INFO" "VM Swappiness: $SWAPPINESS_VALUE"
 
 print_message "SUCCESS" "Kernel optimization completed successfully."
+
