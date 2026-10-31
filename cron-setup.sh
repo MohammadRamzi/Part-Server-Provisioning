@@ -67,7 +67,9 @@ print_message "INFO" "Output directory prepared."
 # Configure Cron
 # ------------------------------------------
 
-CRON_JOB="*/2 * * * * root $SCRIPT_PATH"
+CRON_LOG="/var/log/emperor-penguin-monitor.log"
+
+CRON_JOB="*/2 * * * * root $SCRIPT_PATH >> $CRON_LOG 2>&1"
 
 if [[ -f "$CRON_FILE" ]] &&
    [[ "$(cat "$CRON_FILE")" == "$CRON_JOB" ]]; then
