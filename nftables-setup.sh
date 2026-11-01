@@ -1,5 +1,4 @@
-
-#!/usr/bin/env bash
+#!/bin/bash
 
 set -Eeuo pipefail
 
@@ -12,6 +11,10 @@ DOMAIN="deb.debian.org"
 SSH_PORT="2222"
 
 TEMP_CONFIG=""
+BACKUP_RULESET=""
+BACKUP_CONFIG=""
+CONFIG_EXISTED=false
+BACKUP_CREATED=false
 
 # ------------------------------------------
 # Utility Functions
@@ -36,6 +39,29 @@ error_exit() {
 
 cleanup() {
     [[ -n "$TEMP_CONFIG" && -f "$TEMP_CONFIG" ]] && rm -f "$TEMP_CONFIG"
+    [[ -n "$BACKUP_RULESET" && -f "$BACKUP_RULESET" ]] && rm -f "$BACKUP_RULESET"
+    [[ -n "$BACKUP_CONFIG" && -f "$BACKUP_CONFIG" ]] && rm -f "$BACKUP_CONFIG"
+}
+
+rollback() {
+    print_message "WARNING" "Restoring previous firewall configuration..."
+
+    # Restore previous configuration file
+    if [[ "$CONFIG_EXISTED" == true ]]; then
+        if ! cp -a "$BACKUP_CONFIG" "$CONFIG_FILE"; then
+            print_message "ERROR" "Could not restore previous configuration file."
+        fi
+    else
+        rm -f "$CONFIG_FILE"
+    fi
+
+    # Restore previous active ruleset
+    if nft -f "$BACKUP_RULESET"; then
+        print_message "SUCCESS" "Previous firewall ruleset restored."
+    else
+        print_message "ERROR" "Automatic ruleset restoration failed!"
+        print_message "ERROR" "Manual recovery may be required."
+    fi
 }
 
 trap cleanup EXIT
@@ -48,7 +74,7 @@ if [[ "$EUID" -ne 0 ]]; then
     error_exit "Please run this script as root."
 fi
 
-for command in nft getent systemctl awk sort; do
+for command in nft getent systemctl awk sort date cp install mktemp; do
     command -v "$command" >/dev/null 2>&1 ||
         error_exit "Required command not found: $command"
 done
@@ -79,19 +105,7 @@ fi
 print_message "SUCCESS" "DNS resolution completed."
 
 # ------------------------------------------
-# Backup Existing Configuration
-# ------------------------------------------
-
-if [[ -f "$CONFIG_FILE" ]]; then
-    BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
-
-    cp -a "$CONFIG_FILE" "$BACKUP_FILE"
-
-    print_message "INFO" "Previous configuration backed up to $BACKUP_FILE"
-fi
-
-# ------------------------------------------
-# Generate Nftables Configuration
+# Generate New Configuration
 # ------------------------------------------
 
 TEMP_CONFIG=$(mktemp)
@@ -125,13 +139,11 @@ table inet filter {
         policy accept;
 EOF
 
-# Add IPv4 counters
 for ip in "${IPV4_ADDRESSES[@]}"; do
     printf '        ip daddr %s counter comment "deb.debian.org IPv4"\n' \
         "$ip" >> "$TEMP_CONFIG"
 done
 
-# Add IPv6 counters
 for ip in "${IPV6_ADDRESSES[@]}"; do
     printf '        ip6 daddr %s counter comment "deb.debian.org IPv6"\n' \
         "$ip" >> "$TEMP_CONFIG"
@@ -144,30 +156,54 @@ EOF
 
 chmod 644 "$TEMP_CONFIG"
 
-print_message "INFO" "Nftables configuration generated."
+print_message "SUCCESS" "New configuration generated."
 
 # ------------------------------------------
 # Validate Configuration
 # ------------------------------------------
 
 if ! nft -c -f "$TEMP_CONFIG"; then
-    error_exit "Nftables configuration validation failed."
+    error_exit "Configuration validation failed."
 fi
 
 print_message "SUCCESS" "Configuration validation passed."
 
 # ------------------------------------------
-# Install Configuration
+# Backup Existing Configuration and Rules
+# ------------------------------------------
+
+BACKUP_RULESET=$(mktemp)
+
+{
+    echo "flush ruleset"
+    nft list ruleset
+} > "$BACKUP_RULESET"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+    CONFIG_EXISTED=true
+    BACKUP_CONFIG="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+
+    cp -a "$CONFIG_FILE" "$BACKUP_CONFIG"
+
+    print_message "INFO" "Previous configuration backed up."
+fi
+
+BACKUP_CREATED=true
+
+print_message "SUCCESS" "Current firewall state backed up."
+
+# ------------------------------------------
+# Install and Apply Configuration
 # ------------------------------------------
 
 install -m 644 "$TEMP_CONFIG" "$CONFIG_FILE"
 
-# ------------------------------------------
-# Apply Firewall Rules
-# ------------------------------------------
-
 if ! nft -f "$CONFIG_FILE"; then
-    error_exit "Failed to apply Nftables rules."
+    print_message "ERROR" "Failed to apply new firewall rules."
+
+    rollback
+
+    error_exit "Firewall configuration rolled back."
 fi
 
 print_message "SUCCESS" "Firewall rules applied successfully."
@@ -176,10 +212,14 @@ print_message "SUCCESS" "Firewall rules applied successfully."
 # Enable Nftables Service
 # ------------------------------------------
 
-systemctl enable --now nftables ||
-    error_exit "Failed to enable Nftables service."
+if ! systemctl enable --now nftables; then
+    print_message "ERROR" "Failed to enable Nftables service."
+    rollback
+    error_exit "Firewall configuration rolled back."
+fi
 
 if ! systemctl is-active --quiet nftables; then
+    rollback
     error_exit "Nftables service is not active."
 fi
 
@@ -190,15 +230,18 @@ print_message "SUCCESS" "Nftables service is enabled and active."
 # ------------------------------------------
 
 if ! nft list ruleset >/dev/null 2>&1; then
-    error_exit "Could not verify the active ruleset."
+    rollback
+    error_exit "Final ruleset verification failed."
 fi
 
 echo
 print_message "SUCCESS" "Nftables setup completed successfully."
-echo
+
 echo "Resolved IPv4 addresses: ${#IPV4_ADDRESSES[@]}"
 echo "Resolved IPv6 addresses: ${#IPV6_ADDRESSES[@]}"
 echo "SSH port: $SSH_PORT"
+
 echo
 echo "Active ruleset:"
 nft list ruleset
+
